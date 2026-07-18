@@ -1,30 +1,75 @@
 #!/usr/bin/env bash
 
-# 에러 발생 시 스크립트 실행 중단
-set -e
+set -Eeuo pipefail
+
+for required_command in gh git npm; do
+  if ! command -v "$required_command" >/dev/null 2>&1; then
+    echo "❌ '$required_command' 명령어를 찾을 수 없습니다." >&2
+    exit 1
+  fi
+done
+
+if ! gh auth status >/dev/null 2>&1; then
+  echo "❌ GitHub CLI 인증이 필요합니다. 'gh auth login'을 먼저 실행하세요." >&2
+  exit 1
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+repository="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
+IFS=$'\t' read -r github_name github_login github_id < <(
+  gh api user --jq '[(.name // .login), .login, (.id | tostring)] | @tsv'
+)
+
+deploy_dir="$(mktemp -d)"
+cleanup() {
+  rm -rf "$deploy_dir"
+}
+trap cleanup EXIT
 
 echo "🚀 빌드를 시작합니다..."
 npm run build
 
-echo "📂 빌드 결과물 디렉토리(dist)로 이동합니다..."
-cd dist
+echo "📦 GitHub Pages 배포 커밋을 생성합니다..."
+cp -R dist/. "$deploy_dir/"
+# 이전 배포 스크립트가 dist에 남긴 Git 메타데이터는 복사본에서 제거합니다.
+rm -rf "$deploy_dir/.git"
+touch "$deploy_dir/.nojekyll"
 
-echo "📦 Git 초기화 및 배포 커밋 생성 중..."
-git init
-git checkout -b main
-git add -A
-git commit -m 'deploy: update github pages'
+git -C "$deploy_dir" init --quiet --initial-branch=gh-pages
+git -C "$deploy_dir" config user.name "$github_name"
+git -C "$deploy_dir" config user.email "${github_id}+${github_login}@users.noreply.github.com"
+git -C "$deploy_dir" add -A
+git -C "$deploy_dir" commit --quiet -m 'deploy: update GitHub Pages'
 
-echo "🌐 GitHub Pages로 푸시합니다..."
-# 주의: 아래 명령어는 domineyh.github.io 저장소의 main 브랜치에 배포 결과물을 강제로 덮어씁니다.
-# 만약 해당 저장소의 main 브랜치에 이미 원본 소스코드가 있다면 지워질 수 있으니, 
-# 원본 소스는 'dev'나 'source' 등 다른 브랜치에 관리하시는 것을 권장합니다.
+echo "🌐 ${repository}의 gh-pages 브랜치로 푸시합니다..."
+gh auth setup-git
+git -C "$deploy_dir" push --force "https://github.com/${repository}.git" HEAD:gh-pages
 
-git push -f git@github.com:domineyh/domineyh.github.io.git main
+pages_source="$(
+  gh api "repos/${repository}/pages" \
+    --jq '[.source.branch, .source.path] | join(":")' 2>/dev/null || true
+)"
+pages_source_changed=false
 
-# (선택) 만약 'galaga'와 같이 별도의 레포지토리를 만들어서 서비스하는 경우라면 
-# 위 명령어를 주석 처리하고, 아래 명령어의 주석을 해제해서 gh-pages 브랜치에 배포하세요.
-# git push -f git@github.com:domineyh/<저장소이름>.git main:gh-pages
+if [[ -z "$pages_source" ]]; then
+  echo "⚙️ GitHub Pages를 활성화합니다..."
+  gh api --method POST "repos/${repository}/pages" \
+    -f 'source[branch]=gh-pages' \
+    -f 'source[path]=/' >/dev/null
+  pages_source_changed=true
+elif [[ "$pages_source" != 'gh-pages:/' ]]; then
+  echo "⚙️ GitHub Pages 소스를 gh-pages 브랜치로 변경합니다..."
+  gh api --method PUT "repos/${repository}/pages" \
+    -f 'source[branch]=gh-pages' \
+    -f 'source[path]=/' >/dev/null
+  pages_source_changed=true
+fi
 
-cd -
+if [[ "$pages_source_changed" == true ]]; then
+  echo "🏗️ 변경된 소스에서 GitHub Pages 빌드를 요청합니다..."
+  gh api --method POST "repos/${repository}/pages/builds" >/dev/null
+fi
+
 echo "✅ 배포가 성공적으로 완료되었습니다!"
