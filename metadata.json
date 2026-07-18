@@ -1,0 +1,6 @@
+{
+  "name": "갤러그 클론 (Galaga Clone)",
+  "description": "GitHub Pages 호스팅을 위한 순수 클라이언트 사이드(HTML/CSS/JS Canvas) 갤러그 게임입니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
